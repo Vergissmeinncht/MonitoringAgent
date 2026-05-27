@@ -163,8 +163,8 @@ public class MilvusClientFactory {
         CreateIndexParam vectorIndexParam = CreateIndexParam.newBuilder()
                 .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
                 .withFieldName("vector")
-                .withIndexType(IndexType.IVF_FLAT)
-                .withMetricType(MetricType.L2)  // L2 距离（欧氏距离）
+                .withIndexType(IndexType.HNSW)
+                .withMetricType(MetricType.COSINE)  // 余弦相似度
                 .withExtraParam("{\"nlist\":128}")
                 .withSyncMode(Boolean.FALSE)
                 .build();

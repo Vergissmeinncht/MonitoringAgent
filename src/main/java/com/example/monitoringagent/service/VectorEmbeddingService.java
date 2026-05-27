@@ -135,7 +135,7 @@ public class VectorEmbeddingService {
         return floatEmbedding;
     }
 
-    public List<Float> generateQueryEmbedding(String query) {
+    public List<Float> generateQueryVector(String query) {
         return generateEmbedding(query);
     }
 }
