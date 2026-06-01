@@ -14,9 +14,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
 
 /**
  * 向量搜索服务
@@ -32,6 +30,7 @@ public class VectorSearchService {
 
     @Autowired
     private VectorEmbeddingService embeddingService;
+
 
     /**
      * 搜索相似文档
