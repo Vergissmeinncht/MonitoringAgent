@@ -8,6 +8,7 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
+import com.example.monitoringagent.service.AiOpsService;
 import com.example.monitoringagent.service.ChatService;
 import lombok.Getter;
 import lombok.Setter;
@@ -39,6 +40,8 @@ public class ChatController {
 
     private static final Logger logger = LoggerFactory.getLogger(ChatController.class);
 
+    @Autowired
+    private AiOpsService aiOpsService;
     
     @Autowired
     private ChatService chatService;
@@ -274,6 +277,100 @@ public class ChatController {
         return emitter;
     }
 
+    /**
+     * AI 智能运维接口（SSE 流式模式）- 自动分析告警并生成运维报告
+     * 无需用户输入，自动执行告警分析流程
+     */
+    @PostMapping(value = "/ai_ops", produces = "text/event-stream;charset=UTF-8")
+    public SseEmitter aiOps() {
+        SseEmitter emitter = new SseEmitter(600000L); // 10分钟超时（告警分析可能较慢）
+
+        executor.execute(() -> {
+            try {
+                logger.info("收到 AI 智能运维请求 - 启动多 Agent 协作流程");
+
+                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
+                DashScopeChatModel chatModel = DashScopeChatModel.builder()
+                        .dashScopeApi(dashScopeApi)
+                        .defaultOptions(DashScopeChatOptions.builder()
+                                .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
+                                .withTemperature(0.3)
+                                .withMaxToken(8000)
+                                .withTopP(0.9)
+                                .build())
+                        .build();
+
+                ToolCallback[] toolCallbacks = tools.getToolCallbacks();
+
+                emitter.send(SseEmitter.event().name("message").data(SseMessage.content("正在读取告警并拆解任务...\n")));
+
+                // 调用 AiOpsService 执行分析流程
+                Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks);
+
+                if (overAllStateOptional.isEmpty()) {
+                    emitter.send(SseEmitter.event().name("message")
+                            .data(SseMessage.error("多 Agent 编排未获取到有效结果"), MediaType.APPLICATION_JSON));
+                    emitter.complete();
+                    return;
+                }
+
+                OverAllState state = overAllStateOptional.get();
+                logger.info("AI Ops 编排完成，开始提取最终报告...");
+
+                // 提取最终报告
+                Optional<String> finalReportOptional = aiOpsService.extractFinalReport(state);
+
+                // 输出最终报告
+                if (finalReportOptional.isPresent()) {
+                    String finalReportText = finalReportOptional.get();
+                    logger.info("提取到 Planner 最终报告，长度: {}", finalReportText.length());
+
+                    // 发送分隔线
+                    emitter.send(SseEmitter.event().name("message")
+                            .data(SseMessage.content("\n\n" + "=".repeat(60) + "\n"), MediaType.APPLICATION_JSON));
+
+                    // 发送完整的告警分析报告
+                    emitter.send(SseEmitter.event().name("message")
+                            .data(SseMessage.content("📋 **告警分析报告**\n\n"), MediaType.APPLICATION_JSON));
+
+                    int chunkSize = 50;
+                    for (int i = 0; i < finalReportText.length(); i += chunkSize) {
+                        int end = Math.min(i + chunkSize, finalReportText.length());
+                        String chunk = finalReportText.substring(i, end);
+
+                        emitter.send(SseEmitter.event().name("message")
+                                .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
+                    }
+
+                    // 发送结束分隔线
+                    emitter.send(SseEmitter.event().name("message")
+                            .data(SseMessage.content("\n" + "=".repeat(60) + "\n\n"), MediaType.APPLICATION_JSON));
+
+                    logger.info("最终报告已完整输出");
+                } else {
+                    logger.warn("未能提取到 Planner 最终报告");
+                    emitter.send(SseEmitter.event().name("message")
+                            .data(SseMessage.content("⚠️ 多 Agent 流程已完成，但未能生成最终报告。"), MediaType.APPLICATION_JSON));
+                }
+
+                emitter.send(SseEmitter.event().name("message").data(SseMessage.done(), MediaType.APPLICATION_JSON));
+                emitter.complete();
+                logger.info("AI Ops 多 Agent 编排完成");
+
+            } catch (Exception e) {
+                logger.error("AI Ops 多 Agent 协作失败", e);
+                try {
+                    emitter.send(SseEmitter.event().name("message")
+                            .data(SseMessage.error("AI Ops 流程失败: " + e.getMessage()), MediaType.APPLICATION_JSON));
+                } catch (IOException ex) {
+                    logger.error("发送错误消息失败", ex);
+                }
+                emitter.completeWithError(e);
+            }
+        });
+
+        return emitter;
+    }
 
 
     /**

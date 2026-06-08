@@ -43,6 +43,8 @@ public class VectorSearchService {
         try {
             logger.info("开始搜索相似文档, 查询: {}, topK: {}", query, topK);
 
+            //TODO:优化查询文本，比如扩写、假回答等，以提高搜索效果
+
             // 1. 将查询文本向量化
             List<Float> queryVector = embeddingService.generateQueryVector(query);
             logger.debug("查询向量生成成功, 维度: {}", queryVector.size());
@@ -68,6 +70,8 @@ public class VectorSearchService {
             // 4. 解析搜索结果
             SearchResultsWrapper wrapper = new SearchResultsWrapper(searchResponse.getData().getResults());
             List<SearchResult> results = new ArrayList<>();
+
+            //TODO：搜索结果精排（ReRank），多路召回等后续优化
 
             for (int i = 0; i < wrapper.getRowRecords(0).size(); i++) {
                 SearchResult result = new SearchResult();
