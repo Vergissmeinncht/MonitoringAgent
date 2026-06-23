@@ -194,7 +194,7 @@ public class VectorIndexService {
 
             Gson gson =new Gson();
             JsonObject metadataJson = gson.toJsonTree(metadata).getAsJsonObject();
-            fields.add(new InsertParam.Field("metadata", Collections.singletonList(metadataJson.toString())));
+            fields.add(new InsertParam.Field("metadata", Collections.singletonList(metadataJson)));
 
             //构建插入参数
             InsertParam insertParam = InsertParam.newBuilder()
