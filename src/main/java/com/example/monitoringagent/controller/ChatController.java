@@ -8,8 +8,11 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
+import com.example.monitoringagent.dto.chat.ChatContext;
+import com.example.monitoringagent.dto.chat.ChatMessage;
 import com.example.monitoringagent.service.AiOpsService;
 import com.example.monitoringagent.service.ChatService;
+import com.example.monitoringagent.service.ConversationCompressionService;
 import lombok.Getter;
 import lombok.Setter;
 import org.slf4j.Logger;
@@ -47,15 +50,15 @@ public class ChatController {
     private ChatService chatService;
 
     @Autowired
+    private ConversationCompressionService compressionService;
+
+    @Autowired
     private ToolCallbackProvider tools;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
     // 存储会话信息
     private final Map<String, SessionInfo> sessions = new ConcurrentHashMap<>();
-
-    // 最大历史消息窗口大小（成对计算：用户消息+AI回复=1对）
-    private static final int MAX_WINDOW_SIZE = 6;
 
     /**
      * 普通对话接口（支持工具调用）
@@ -75,9 +78,9 @@ public class ChatController {
             // 获取或创建会话
             SessionInfo session = getOrCreateSession(request.getId());
 
-            // 获取历史消息
-            List<Map<String, String>> history = session.getHistory();
-            logger.info("会话历史消息对数: {}", history.size() / 2);
+            // 获取压缩后的对话上下文
+            ChatContext context = session.prepareContext(request.getQuestion(), compressionService);
+            logger.info("会话历史消息对数: {}, 压缩次数: {}", session.getMessagePairCount(), session.getCompressionCount());
 
             // 创建 DashScope API 和 ChatModel
             DashScopeApi dashScopeApi = chatService.createDashScopeApi();
@@ -88,8 +91,8 @@ public class ChatController {
 
             logger.info("开始 ReactAgent 对话（支持自动工具调用）");
 
-            // 构建系统提示词（包含历史消息）
-            String systemPrompt = chatService.buildSystemPrompt(history);
+            // 构建系统提示词（包含长期摘要和最近对话）
+            String systemPrompt = chatService.buildSystemPrompt(context);
 
             // 创建 ReactAgent
             ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
@@ -163,9 +166,9 @@ public class ChatController {
                 // 获取或创建会话
                 SessionInfo session = getOrCreateSession(request.getId());
 
-                // 获取历史消息
-                List<Map<String, String>> history = session.getHistory();
-                logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
+                // 获取压缩后的对话上下文
+                ChatContext context = session.prepareContext(request.getQuestion(), compressionService);
+                logger.info("ReactAgent 会话历史消息对数: {}, 压缩次数: {}", session.getMessagePairCount(), session.getCompressionCount());
 
                 // 创建 DashScope API 和 ChatModel
                 DashScopeApi dashScopeApi = chatService.createDashScopeApi();
@@ -176,8 +179,8 @@ public class ChatController {
 
                 logger.info("开始 ReactAgent 流式对话（支持自动工具调用）");
 
-                // 构建系统提示词（包含历史消息）
-                String systemPrompt = chatService.buildSystemPrompt(history);
+                // 构建系统提示词（包含长期摘要和最近对话）
+                String systemPrompt = chatService.buildSystemPrompt(context);
 
                 // 创建 ReactAgent
                 ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
@@ -387,6 +390,10 @@ public class ChatController {
                 response.setSessionId(sessionId);
                 response.setMessagePairCount(session.getMessagePairCount());
                 response.setCreateTime(session.createTime);
+                response.setCompressionCount(session.getCompressionCount());
+                response.setHasSummary(session.hasSummary());
+                response.setLastCompressedAt(session.getLastCompressedAt());
+                response.setLastTokenEstimate(session.getLastTokenEstimate());
                 return ResponseEntity.ok(ApiResponse.success(response));
             } else {
                 return ResponseEntity.ok(ApiResponse.error("会话不存在"));
@@ -415,10 +422,13 @@ public class ChatController {
      */
     private static class SessionInfo {
         private final String sessionId;
-        // 存储历史消息对：[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
-        private final List<Map<String, String>> messageHistory;
+        private final List<ChatMessage> messageHistory;
         private final long createTime;
         private final ReentrantLock lock;
+        private String summary;
+        private int compressionCount;
+        private long lastCompressedAt;
+        private int lastTokenEstimate;
 
         public SessionInfo(String sessionId) {
             this.sessionId = sessionId;
@@ -429,53 +439,54 @@ public class ChatController {
 
         /**
          * 添加一对消息（用户问题 + AI回复）
-         * 自动管理历史消息窗口大小
          */
         public void addMessage(String userQuestion, String aiAnswer) {
             lock.lock();
             try {
-                // 添加用户消息
-                Map<String, String> userMsg = new HashMap<>();
-                userMsg.put("role", "user");
-                userMsg.put("content", userQuestion);
-                messageHistory.add(userMsg);
-
-                // 添加AI回复
-                Map<String, String> assistantMsg = new HashMap<>();
-                assistantMsg.put("role", "assistant");
-                assistantMsg.put("content", aiAnswer);
-                messageHistory.add(assistantMsg);
-
-                // 自动清理：保持最多 MAX_WINDOW_SIZE 对消息
-                // 每对消息包含2条记录（user + assistant）
-                int maxMessages = MAX_WINDOW_SIZE * 2;
-                while (messageHistory.size() > maxMessages) {
-                    // 成对删除最旧的消息（删除前2条）
-                    messageHistory.remove(0); // 删除最旧的用户消息
-                    if (!messageHistory.isEmpty()) {
-                        messageHistory.remove(0); // 删除对应的AI回复
-                    }
-                }
-
+                messageHistory.add(ChatMessage.of("user", userQuestion));
+                messageHistory.add(ChatMessage.of("assistant", aiAnswer));
                 logger.debug("会话 {} 更新历史消息，当前消息对数: {}",
                         sessionId, messageHistory.size() / 2);
-
             } finally {
                 lock.unlock();
             }
         }
 
         /**
-         * 获取历史消息（线程安全）
-         * 返回副本以避免并发修改
+         * 获取用于构建 prompt 的上下文，并在达到阈值时自动压缩旧消息。
          */
-        public List<Map<String, String>> getHistory() {
+        public ChatContext prepareContext(String currentQuestion, ConversationCompressionService compressionService) {
             lock.lock();
             try {
-                return new ArrayList<>(messageHistory);
+                lastTokenEstimate = compressionService.estimateConversation(summary, messageHistory, currentQuestion);
+                if (compressionService.shouldCompress(summary, messageHistory, currentQuestion)) {
+                    logger.info("会话 {} 触发上下文压缩，压缩前估算 token: {}", sessionId, lastTokenEstimate);
+                    ConversationCompressionService.CompressionResult result = compressionService.compress(summary, messageHistory, currentQuestion);
+                    summary = result.getSummary();
+                    messageHistory.clear();
+                    messageHistory.addAll(result.getRecentMessages());
+                    lastTokenEstimate = result.getEstimatedTokensAfter();
+                    if (result.isCompressed()) {
+                        compressionCount++;
+                        lastCompressedAt = System.currentTimeMillis();
+                        logger.info("会话 {} 上下文压缩完成，压缩后估算 token: {}", sessionId, lastTokenEstimate);
+                    }
+                }
+                return toChatContext();
+            } catch (Exception e) {
+                logger.error("会话 {} 上下文压缩失败，继续使用当前历史", sessionId, e);
+                return toChatContext();
             } finally {
                 lock.unlock();
             }
+        }
+
+        private ChatContext toChatContext() {
+            ChatContext context = new ChatContext();
+            context.setSummary(summary);
+            context.setRecentMessages(new ArrayList<>(messageHistory));
+            context.setCompressionCount(compressionCount);
+            return context;
         }
 
         /**
@@ -485,6 +496,10 @@ public class ChatController {
             lock.lock();
             try {
                 messageHistory.clear();
+                summary = null;
+                compressionCount = 0;
+                lastCompressedAt = 0;
+                lastTokenEstimate = 0;
                 logger.info("会话 {} 历史消息已清空", sessionId);
             } finally {
                 lock.unlock();
@@ -498,6 +513,42 @@ public class ChatController {
             lock.lock();
             try {
                 return messageHistory.size() / 2;
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        public int getCompressionCount() {
+            lock.lock();
+            try {
+                return compressionCount;
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        public boolean hasSummary() {
+            lock.lock();
+            try {
+                return summary != null && !summary.isBlank();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        public long getLastCompressedAt() {
+            lock.lock();
+            try {
+                return lastCompressedAt;
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        public int getLastTokenEstimate() {
+            lock.lock();
+            try {
+                return lastTokenEstimate;
             } finally {
                 lock.unlock();
             }
@@ -542,6 +593,10 @@ public class ChatController {
         private String sessionId;
         private int messagePairCount;
         private long createTime;
+        private int compressionCount;
+        private boolean hasSummary;
+        private long lastCompressedAt;
+        private int lastTokenEstimate;
     }
 
     /**

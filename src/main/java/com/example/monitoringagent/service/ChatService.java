@@ -9,6 +9,8 @@ import com.example.monitoringagent.agent.tool.DateTimeTools;
 import com.example.monitoringagent.agent.tool.InternalDocsTools;
 import com.example.monitoringagent.agent.tool.QueryLogsTools;
 import com.example.monitoringagent.agent.tool.QueryMetricsTools;
+import com.example.monitoringagent.dto.chat.ChatContext;
+import com.example.monitoringagent.dto.chat.ChatMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -18,7 +20,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
-import java.util.Map;
 
 /**
  * 聊天服务
@@ -82,11 +83,18 @@ public class ChatService {
     }
 
     /**
-     * 构建系统提示词（包含历史消息）
-     * @param history 历史消息列表
+     * 创建摘要压缩 ChatModel（低随机性，摘要更稳定）
+     */
+    public DashScopeChatModel createSummaryChatModel(DashScopeApi dashScopeApi) {
+        return createChatModel(dashScopeApi, 0.2, 1000, 0.8);
+    }
+
+    /**
+     * 构建系统提示词（包含长期摘要和最近对话）
+     * @param context 对话上下文
      * @return 完整的系统提示词
      */
-    public String buildSystemPrompt(List<Map<String, String>> history) {
+    public String buildSystemPrompt(ChatContext context) {
         StringBuilder systemPromptBuilder = new StringBuilder();
 
         // 基础系统提示
@@ -96,22 +104,27 @@ public class ChatService {
         systemPromptBuilder.append("当用户需要查询 Prometheus 告警、监控指标或系统告警状态时，使用 queryPrometheusAlerts 工具。\n");
         systemPromptBuilder.append("当用户需要查询腾讯云日志时，请调用腾讯云mcp服务查询,默认查询地域ap-guangzhou,查询时间范围为近一个月。\n\n");
 
-        // 添加历史消息
-        if (!history.isEmpty()) {
-            systemPromptBuilder.append("--- 对话历史 ---\n");
-            for (Map<String, String> msg : history) {
-                String role = msg.get("role");
-                String content = msg.get("content");
+        if (context != null && context.getSummary() != null && !context.getSummary().isBlank()) {
+            systemPromptBuilder.append("--- 压缩后的长期记忆 ---\n");
+            systemPromptBuilder.append(context.getSummary()).append("\n");
+            systemPromptBuilder.append("--- 长期记忆结束 ---\n\n");
+        }
+
+        if (context != null && !context.getRecentMessages().isEmpty()) {
+            systemPromptBuilder.append("--- 最近对话原文 ---\n");
+            for (ChatMessage msg : context.getRecentMessages()) {
+                String role = msg.getRole();
+                String content = msg.getContent();
                 if ("user".equals(role)) {
                     systemPromptBuilder.append("用户: ").append(content).append("\n");
                 } else if ("assistant".equals(role)) {
                     systemPromptBuilder.append("助手: ").append(content).append("\n");
                 }
             }
-            systemPromptBuilder.append("--- 对话历史结束 ---\n\n");
+            systemPromptBuilder.append("--- 最近对话结束 ---\n\n");
         }
 
-        systemPromptBuilder.append("请基于以上对话历史，回答用户的新问题。");
+        systemPromptBuilder.append("请基于以上长期记忆和最近对话，回答用户的新问题。");
 
         return systemPromptBuilder.toString();
     }

@@ -72,6 +72,16 @@ rag:
     model: "gte-rerank-v2"  # ??????????
     top-n: 3  # ?????????????
 
+# Chat memory
+chat:
+  memory:
+    enabled: true
+    max-context-tokens: 1000000
+    compression-threshold-ratio: 0.7
+    reserved-output-tokens: 2000
+    min-recent-message-pairs: 3
+    summary-max-tokens: 1000
+
 # Prometheus ??
 prometheus:
   base-url: http://localhost:9090
