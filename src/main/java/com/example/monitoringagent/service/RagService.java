@@ -9,6 +9,8 @@ import com.alibaba.dashscope.exception.ApiException;
 import com.alibaba.dashscope.exception.InputRequiredException;
 import com.alibaba.dashscope.exception.NoApiKeyException;
 import com.alibaba.dashscope.utils.Constants;
+import com.example.monitoringagent.dto.ragtest.RagQueryResult;
+import com.example.monitoringagent.dto.ragtest.RagRetrievedDocument;
 import io.reactivex.Flowable;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -33,11 +35,17 @@ public class RagService {
     @Autowired
     private VectorSearchService vectorSearchService;
 
+    @Autowired
+    private DashScopeReRankService dashScopeReRankService;
+
     @Value("${dashscope.api.key}")
     private String apiKey;
 
     @Value("${rag.top-k:3}")
     private int topK;
+
+    @Value("${rag.rerank.top-n:${rag.top-k:3}}")
+    private int rerankTopN;
 
     @Value("${rag.model:qwen3-30b-a3b-thinking-2507}")
     private String model;
@@ -53,7 +61,7 @@ public class RagService {
         // 创建 Generation 实例
         generation = new Generation();
         
-        logger.info("RAG 服务初始化完成，model: {}, topK: {}", model, topK);
+        logger.info("RAG 服务初始化完成，model: {}, topK: {}, rerankTopN: {}", model, topK, rerankTopN);
     }
 
     /**
@@ -78,11 +86,8 @@ public class RagService {
             logger.info("收到 RAG 流式查询: {}", question);
 
             // 1. 从向量数据库检索相关文档
-            List<VectorSearchService.SearchResult> searchResults = 
+            List<VectorSearchService.SearchResult> searchResults =
                 vectorSearchService.searchSimilarDocuments(question, topK);
-
-            // 发送检索结果
-            callback.onSearchResults(searchResults);
 
             if (searchResults.isEmpty()) {
                 logger.warn("未找到相关文档");
@@ -90,8 +95,13 @@ public class RagService {
                 return;
             }
 
+            List<VectorSearchService.SearchResult> rerankedResults =
+                    dashScopeReRankService.rerank(question, searchResults, rerankTopN);
+
+            callback.onSearchResults(rerankedResults);
+
             // 2. 构建上下文和提示词
-            String context = buildContext(searchResults);
+            String context = buildContext(rerankedResults);
             String prompt = buildPrompt(question, context);
 
             // 3. 流式调用大语言模型（传入历史消息）
@@ -101,6 +111,69 @@ public class RagService {
             logger.error("RAG 流式查询失败", e);
             callback.onError(e);
         }
+    }
+
+    /**
+     * 同步处理用户问题，便于批量评测场景复用完整 RAG 链路。
+     */
+    public RagQueryResult query(String question, List<Map<String, String>> history) {
+        long startTime = System.currentTimeMillis();
+        RagQueryResult queryResult = new RagQueryResult();
+        List<RagRetrievedDocument> retrievedDocuments = new ArrayList<>();
+        StringBuilder answerBuilder = new StringBuilder();
+        StringBuilder reasoningBuilder = new StringBuilder();
+
+        queryStream(question, history == null ? new ArrayList<>() : history, new StreamCallback() {
+            @Override
+            public void onSearchResults(List<VectorSearchService.SearchResult> results) {
+                for (VectorSearchService.SearchResult result : results) {
+                    RagRetrievedDocument document = new RagRetrievedDocument();
+                    document.setId(result.getId());
+                    document.setContent(result.getContent());
+                    document.setScore(result.getScore());
+                    document.setMetadata(result.getMetadata());
+                    retrievedDocuments.add(document);
+                }
+            }
+
+            @Override
+            public void onReasoningChunk(String chunk) {
+                reasoningBuilder.append(chunk);
+            }
+
+            @Override
+            public void onContentChunk(String chunk) {
+                answerBuilder.append(chunk);
+            }
+
+            @Override
+            public void onComplete(String fullContent, String fullReasoning) {
+                queryResult.setAnswer(fullContent);
+                queryResult.setReasoningContent(fullReasoning);
+            }
+
+            @Override
+            public void onError(Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        if (queryResult.getAnswer() == null) {
+            queryResult.setAnswer(answerBuilder.toString());
+        }
+        if (queryResult.getReasoningContent() == null) {
+            queryResult.setReasoningContent(reasoningBuilder.toString());
+        }
+        queryResult.setSearchResults(retrievedDocuments);
+        queryResult.setLatencyMs(System.currentTimeMillis() - startTime);
+        return queryResult;
+    }
+
+    /**
+     * 同步处理用户问题（不带历史消息）。
+     */
+    public RagQueryResult query(String question) {
+        return query(question, new ArrayList<>());
     }
 
     /**
