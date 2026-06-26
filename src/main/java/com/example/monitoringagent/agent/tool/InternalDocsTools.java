@@ -25,21 +25,29 @@ public class InternalDocsTools {
     public static final String TOOL_QUERY_INTERNAL_DOCS = "queryInternalDocs";
     
     private final VectorSearchService vectorSearchService;
-    
-    @Value("${rag.top-k:3}")
-    private int topK = 3; // 默认值
-    
+    private final com.example.monitoringagent.rag.query.DiagnosticQueryParser diagnosticQueryParser;
+    private final com.example.monitoringagent.rag.retrieval.HybridRetrievalService hybridRetrievalService;
+    private final com.example.monitoringagent.service.DashScopeReRankService dashScopeReRankService;
+
+    @Value("${rag.rerank.top-n:${rag.top-k:3}}")
+    private int rerankTopN = 3; // 默认值
+
     private final ObjectMapper objectMapper = new ObjectMapper();
-    
+
     /**
      * 构造函数注入依赖
-     * Spring 会自动注入 VectorSearchService
      */
     @Autowired
-    public InternalDocsTools(VectorSearchService vectorSearchService) {
+    public InternalDocsTools(VectorSearchService vectorSearchService,
+                             com.example.monitoringagent.rag.query.DiagnosticQueryParser diagnosticQueryParser,
+                             com.example.monitoringagent.rag.retrieval.HybridRetrievalService hybridRetrievalService,
+                             com.example.monitoringagent.service.DashScopeReRankService dashScopeReRankService) {
         this.vectorSearchService = vectorSearchService;
+        this.diagnosticQueryParser = diagnosticQueryParser;
+        this.hybridRetrievalService = hybridRetrievalService;
+        this.dashScopeReRankService = dashScopeReRankService;
     }
-    
+
     /**
      * 查询内部文档工具
      *
@@ -51,28 +59,45 @@ public class InternalDocsTools {
             "This is useful when you need to understand internal procedures, best practices, or step-by-step guides " +
             "stored in the company's documentation.")
     public String queryInternalDocs(
-            @ToolParam(description = "Search query describing what information you are looking for") 
+            @ToolParam(description = "Search query describing what information you are looking for")
             String query) {
-        
+
 
         try {
-            // 使用向量搜索服务检索相关文档
-            List<VectorSearchService.SearchResult> searchResults = 
-                    vectorSearchService.searchSimilarDocuments(query, topK);
-            
-            if (searchResults.isEmpty()) {
+            // 1. 查询预处理 + 混合多路召回
+            com.example.monitoringagent.rag.query.DiagnosticQuery diagnosticQuery =
+                    diagnosticQueryParser.parse(query);
+            List<com.example.monitoringagent.rag.retrieval.RetrievalCandidate> candidates =
+                    hybridRetrievalService.retrieve(diagnosticQuery);
+
+            if (candidates.isEmpty()) {
                 return "{\"status\": \"no_results\", \"message\": \"No relevant documents found in the knowledge base.\"}";
             }
-            
+
+            // 2. 转换为重排输入
+            List<VectorSearchService.SearchResult> retrieved = new java.util.ArrayList<>();
+            for (com.example.monitoringagent.rag.retrieval.RetrievalCandidate candidate : candidates) {
+                VectorSearchService.SearchResult result = new VectorSearchService.SearchResult();
+                result.setId(candidate.getId());
+                result.setContent(candidate.getContent());
+                result.setMetadata(candidate.getMetadata());
+                result.setScore(candidate.getVectorScore());
+                retrieved.add(result);
+            }
+
+            // 3. 百炼重排
+            List<VectorSearchService.SearchResult> rerankedResults =
+                    dashScopeReRankService.rerank(query, retrieved, rerankTopN);
+
             // 将搜索结果转换为 JSON 格式
-            String resultJson = objectMapper.writeValueAsString(searchResults);
-            
+            String resultJson = objectMapper.writeValueAsString(rerankedResults);
+
 
             return resultJson;
-            
+
         } catch (Exception e) {
             logger.error("[工具错误] queryInternalDocs 执行失败", e);
-            return String.format("{\"status\": \"error\", \"message\": \"Failed to query internal docs: %s\"}", 
+            return String.format("{\"status\": \"error\", \"message\": \"Failed to query internal docs: %s\"}",
                     e.getMessage());
         }
     }

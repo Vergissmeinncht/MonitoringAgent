@@ -71,6 +71,14 @@ rag:
   rerank:
     model: "gte-rerank-v2"  # ??????????
     top-n: 3  # ?????????????
+  hybrid:
+    vector-top-k: 10   # 向量召回候选数
+    bm25-top-k: 10     # BM25 召回候选数
+    candidate-limit: 20  # 融合去重后进入重排的候选上限
+  bm25:
+    index-path: ./volumes/bm25-index  # Lucene 本地索引目录
+  diagnosis:
+    enable-reflection: true  # 是否启用诊断反思 prompt
 
 # Chat memory
 chat:

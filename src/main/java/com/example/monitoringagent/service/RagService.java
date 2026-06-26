@@ -9,8 +9,13 @@ import com.alibaba.dashscope.exception.ApiException;
 import com.alibaba.dashscope.exception.InputRequiredException;
 import com.alibaba.dashscope.exception.NoApiKeyException;
 import com.alibaba.dashscope.utils.Constants;
+import com.example.monitoringagent.config.RagProperties;
 import com.example.monitoringagent.dto.ragtest.RagQueryResult;
 import com.example.monitoringagent.dto.ragtest.RagRetrievedDocument;
+import com.example.monitoringagent.rag.query.DiagnosticQuery;
+import com.example.monitoringagent.rag.query.DiagnosticQueryParser;
+import com.example.monitoringagent.rag.retrieval.HybridRetrievalService;
+import com.example.monitoringagent.rag.retrieval.RetrievalCandidate;
 import io.reactivex.Flowable;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -37,6 +42,15 @@ public class RagService {
 
     @Autowired
     private DashScopeReRankService dashScopeReRankService;
+
+    @Autowired
+    private DiagnosticQueryParser diagnosticQueryParser;
+
+    @Autowired
+    private HybridRetrievalService hybridRetrievalService;
+
+    @Autowired
+    private RagProperties ragProperties;
 
     @Value("${dashscope.api.key}")
     private String apiKey;
@@ -85,32 +99,54 @@ public class RagService {
         try {
             logger.info("收到 RAG 流式查询: {}", question);
 
-            // 1. 从向量数据库检索相关文档
-            List<VectorSearchService.SearchResult> searchResults =
-                vectorSearchService.searchSimilarDocuments(question, topK);
+            // 1. 查询预处理：提取错误码/异常类/组件/版本/环境
+            DiagnosticQuery diagnosticQuery = diagnosticQueryParser.parse(question);
 
-            if (searchResults.isEmpty()) {
+            // 2. 混合多路召回（向量 + BM25，BM25 不可用时自动降级为纯向量）
+            List<RetrievalCandidate> candidates = hybridRetrievalService.retrieve(diagnosticQuery);
+
+            if (candidates.isEmpty()) {
                 logger.warn("未找到相关文档");
                 callback.onComplete("抱歉，我在知识库中没有找到相关信息来回答您的问题。", "");
                 return;
             }
 
+            // 3. 转换为重排输入
+            List<VectorSearchService.SearchResult> retrieved = toSearchResults(candidates);
+
+            // 4. 百炼重排（确保代码/版本匹配项优先）
             List<VectorSearchService.SearchResult> rerankedResults =
-                    dashScopeReRankService.rerank(question, searchResults, rerankTopN);
+                    dashScopeReRankService.rerank(question, retrieved, rerankTopN);
 
             callback.onSearchResults(rerankedResults);
 
-            // 2. 构建上下文和提示词
+            // 5. 构建上下文和诊断反思提示词
             String context = buildContext(rerankedResults);
-            String prompt = buildPrompt(question, context);
+            String prompt = buildPrompt(question, context, diagnosticQuery);
 
-            // 3. 流式调用大语言模型（传入历史消息）
+            // 6. 流式调用大语言模型（传入历史消息）
             generateAnswerStream(prompt, history, callback);
 
         } catch (Exception e) {
             logger.error("RAG 流式查询失败", e);
             callback.onError(e);
         }
+    }
+
+    /**
+     * 将混合召回候选转换为重排服务可用的检索结果。
+     */
+    private List<VectorSearchService.SearchResult> toSearchResults(List<RetrievalCandidate> candidates) {
+        List<VectorSearchService.SearchResult> results = new ArrayList<>();
+        for (RetrievalCandidate candidate : candidates) {
+            VectorSearchService.SearchResult result = new VectorSearchService.SearchResult();
+            result.setId(candidate.getId());
+            result.setContent(candidate.getContent());
+            result.setMetadata(candidate.getMetadata());
+            result.setScore(candidate.getVectorScore());
+            results.add(result);
+        }
+        return results;
     }
 
     /**
@@ -192,15 +228,51 @@ public class RagService {
     }
 
     /**
-     * 构建提示词
+     * 构建提示词（支持诊断反思）
      */
-    private String buildPrompt(String question, String context) {
+    private String buildPrompt(String question, String context, DiagnosticQuery diagnosticQuery) {
+        if (!ragProperties.getDiagnosis().isEnableReflection()) {
+            return String.format(
+                "你是一个专业的AI助手。请根据以下参考资料回答用户的问题。\n\n" +
+                "参考资料：\n%s\n" +
+                "用户问题：%s\n\n" +
+                "请基于上述参考资料给出准确、详细的回答。如果参考资料中没有相关信息，请明确说明。",
+                context, question
+            );
+        }
+
+        StringBuilder signals = new StringBuilder();
+        if (diagnosticQuery != null && diagnosticQuery.hasKeywordSignals()) {
+            if (!diagnosticQuery.getErrorCodes().isEmpty()) {
+                signals.append("- 错误码: ").append(diagnosticQuery.getErrorCodes()).append("\n");
+            }
+            if (!diagnosticQuery.getExceptions().isEmpty()) {
+                signals.append("- 异常类: ").append(diagnosticQuery.getExceptions()).append("\n");
+            }
+            if (!diagnosticQuery.getComponents().isEmpty()) {
+                signals.append("- 组件: ").append(diagnosticQuery.getComponents()).append("\n");
+            }
+            if (!diagnosticQuery.getVersions().isEmpty()) {
+                signals.append("- 版本: ").append(diagnosticQuery.getVersions()).append("\n");
+            }
+            if (!diagnosticQuery.getEnvironments().isEmpty()) {
+                signals.append("- 环境: ").append(diagnosticQuery.getEnvironments()).append("\n");
+            }
+        }
+
         return String.format(
-            "你是一个专业的AI助手。请根据以下参考资料回答用户的问题。\n\n" +
+            "你是一个专业的报错诊断助手。请根据以下参考资料诊断用户的报错问题。\n\n" +
             "参考资料：\n%s\n" +
             "用户问题：%s\n\n" +
-            "请基于上述参考资料给出准确、详细的回答。如果参考资料中没有相关信息，请明确说明。",
-            context, question
+            "已从用户问题中识别到的关键信息：\n%s\n" +
+            "在回答前，请先进行诊断反思：\n" +
+            "1. 判断每条参考资料是否真正匹配用户的错误码、异常类、组件。\n" +
+            "2. 校验参考资料的版本与环境是否与用户一致；若不一致，必须明确指出差异和风险。\n" +
+            "3. 不要把其他版本或其他组件的解决方案直接当作确定结论。\n\n" +
+            "请按以下结构输出：\n" +
+            "## 结论\n## 命中的关键信息\n## 可能原因\n## 排查步骤\n## 修复建议\n## 适用条件与风险\n## 仍需补充的信息\n\n" +
+            "如果参考资料不足以诊断，请在“仍需补充的信息”中明确说明。",
+            context, question, signals.length() == 0 ? "（未识别到明确的错误码/版本/环境信息）\n" : signals.toString()
         );
     }
 

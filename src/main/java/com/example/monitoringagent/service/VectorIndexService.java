@@ -38,6 +38,9 @@ public class VectorIndexService {
     @Autowired
     private DocumentChunkService chunkService;
 
+    @Autowired
+    private com.example.monitoringagent.rag.retrieval.Bm25IndexService bm25IndexService;
+
     @Value("${file.upload.path}")
     private String uploadPath;
 
@@ -129,6 +132,13 @@ public class VectorIndexService {
                 long deleteCnt = response.getData().getDeleteCnt();
                 logger.info("删除旧数据完成，路径：{}，删除数量: {}", normalizedPath, deleteCnt);
             }
+
+            // 同步删除 BM25 索引中该文件的旧分片，保持双库一致
+            try {
+                bm25IndexService.deleteBySource(normalizedPath);
+            } catch (Exception e) {
+                logger.warn("删除 BM25 旧分片失败：{}", e.getMessage());
+            }
         }catch (Exception e){
             logger.warn("删除旧数据失败（可能是首次索引）：{}", e.getMessage());
         }
@@ -209,6 +219,14 @@ public class VectorIndexService {
                 throw new RuntimeException("插入数据失败，状态码: "+insertResponse.getStatus()+", 消息: "+insertResponse.getMessage());
             }
             logger.debug("成功插入数据到Milvus，ID: {}, 文件: {}, 分片索引: {}, 内容长度: {}", id, metadata.get("_source"), chunkIndex, content.length());
+
+            // 同步写入 BM25 索引（双写）；失败不阻断 Milvus 入库
+            try {
+                String bm25MetadataJson = new Gson().toJsonTree(metadata).toString();
+                bm25IndexService.indexChunk(id, content, bm25MetadataJson, source);
+            } catch (Exception e) {
+                logger.warn("BM25 写入失败（不影响向量入库），ID: {}, 错误: {}", id, e.getMessage());
+            }
         }catch (Exception e){
             logger.error("插入向量到Milvus失败",e);
             throw e;
