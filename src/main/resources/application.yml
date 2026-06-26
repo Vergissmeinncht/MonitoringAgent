@@ -79,6 +79,11 @@ rag:
     index-path: ./volumes/bm25-index  # Lucene 本地索引目录
   diagnosis:
     enable-reflection: true  # 是否启用诊断反思 prompt
+  embedding:
+    cache:
+      enabled: true        # 查询向量缓存开关
+      max-size: 1000       # 缓存最大条目数
+      ttl-minutes: 60      # 缓存过期时间（分钟）
 
 # Chat memory
 chat:

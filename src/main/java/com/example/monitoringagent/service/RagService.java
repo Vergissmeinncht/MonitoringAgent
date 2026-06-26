@@ -98,12 +98,15 @@ public class RagService {
     public void queryStream(String question, List<Map<String, String>> history, StreamCallback callback) {
         try {
             logger.info("收到 RAG 流式查询: {}", question);
+            long t0 = System.currentTimeMillis();
 
             // 1. 查询预处理：提取错误码/异常类/组件/版本/环境
             DiagnosticQuery diagnosticQuery = diagnosticQueryParser.parse(question);
+            long tParse = System.currentTimeMillis();
 
             // 2. 混合多路召回（向量 + BM25，BM25 不可用时自动降级为纯向量）
             List<RetrievalCandidate> candidates = hybridRetrievalService.retrieve(diagnosticQuery);
+            long tRetrieve = System.currentTimeMillis();
 
             if (candidates.isEmpty()) {
                 logger.warn("未找到相关文档");
@@ -117,12 +120,16 @@ public class RagService {
             // 4. 百炼重排（确保代码/版本匹配项优先）
             List<VectorSearchService.SearchResult> rerankedResults =
                     dashScopeReRankService.rerank(question, retrieved, rerankTopN);
+            long tRerank = System.currentTimeMillis();
 
             callback.onSearchResults(rerankedResults);
 
             // 5. 构建上下文和诊断反思提示词
             String context = buildContext(rerankedResults);
             String prompt = buildPrompt(question, context, diagnosticQuery);
+
+            logger.info("RAG 检索阶段耗时(ms): 解析={}, 召回={}, 重排={}, 检索合计={}",
+                    tParse - t0, tRetrieve - tParse, tRerank - tRetrieve, tRerank - t0);
 
             // 6. 流式调用大语言模型（传入历史消息）
             generateAnswerStream(prompt, history, callback);
@@ -158,6 +165,7 @@ public class RagService {
         List<RagRetrievedDocument> retrievedDocuments = new ArrayList<>();
         StringBuilder answerBuilder = new StringBuilder();
         StringBuilder reasoningBuilder = new StringBuilder();
+        long[] firstTokenAt = {-1};
 
         queryStream(question, history == null ? new ArrayList<>() : history, new StreamCallback() {
             @Override
@@ -179,6 +187,9 @@ public class RagService {
 
             @Override
             public void onContentChunk(String chunk) {
+                if (firstTokenAt[0] < 0 && chunk != null && !chunk.isEmpty()) {
+                    firstTokenAt[0] = System.currentTimeMillis();
+                }
                 answerBuilder.append(chunk);
             }
 
@@ -202,6 +213,8 @@ public class RagService {
         }
         queryResult.setSearchResults(retrievedDocuments);
         queryResult.setLatencyMs(System.currentTimeMillis() - startTime);
+        queryResult.setFirstTokenMs(firstTokenAt[0] < 0 ? -1 : firstTokenAt[0] - startTime);
+        logger.info("RAG 查询完成: 首字={}ms, 总时长={}ms", queryResult.getFirstTokenMs(), queryResult.getLatencyMs());
         return queryResult;
     }
 
@@ -326,32 +339,38 @@ public class RagService {
                 .build();
 
         logger.info("开始调用AI模型流式接口...");
-        
+        long llmCallStart = System.currentTimeMillis();
+
         Flowable<GenerationResult> result = generation.streamCall(param);
-        
+
         StringBuilder reasoningContent = new StringBuilder();
         StringBuilder finalContent = new StringBuilder();
-        
+        long[] llmFirstTokenAt = {-1};
+
         logger.info("开始接收AI模型流式响应...");
 
         result.blockingForEach(message -> {
-            if (message.getOutput() != null && 
-                message.getOutput().getChoices() != null && 
+            if (message.getOutput() != null &&
+                message.getOutput().getChoices() != null &&
                 !message.getOutput().getChoices().isEmpty()) {
-                
+
                 // 获取消息内容
                 // 注意：qwen3-30b-a3b-thinking-2507 模型会在 content 中返回完整内容
                 // reasoning 部分可能需要通过特殊方式提取或者直接包含在 content 中
                 String content = message.getOutput().getChoices().get(0).getMessage().getContent();
 
                 if (content != null && !content.isEmpty()) {
+                    if (llmFirstTokenAt[0] < 0) {
+                        llmFirstTokenAt[0] = System.currentTimeMillis();
+                        logger.info("LLM 首字到达，模型生成首字耗时(ms): {}", llmFirstTokenAt[0] - llmCallStart);
+                    }
                     logger.debug("收到AI模型内容块: {}", content);
-                    
+
                     // 对于 thinking 模型，content 可能包含思考过程和最终答案
                     // 这里我们将所有内容都作为答案返回
                     finalContent.append(content);
                     callback.onContentChunk(content);
-                    
+
                     logger.debug("已调用 onContentChunk 回调");
                 } else {
                     logger.debug("收到空内容块，跳过");

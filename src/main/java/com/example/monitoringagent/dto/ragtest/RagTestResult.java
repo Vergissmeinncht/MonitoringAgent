@@ -23,6 +23,7 @@ public class RagTestResult {
     private double ndcg;
     private double answerRelevancy;
     private long latencyMs;
+    private long firstTokenMs = -1;
     private boolean passed;
     private String errorMessage;
 }

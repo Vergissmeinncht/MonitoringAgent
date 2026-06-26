@@ -3,6 +3,9 @@ package com.example.monitoringagent.service;
 import com.alibaba.dashscope.embeddings.*;
 import com.alibaba.dashscope.exception.NoApiKeyException;
 import com.alibaba.dashscope.utils.Constants;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import jakarta.annotation.PostConstruct;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
@@ -11,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -28,7 +32,19 @@ public class VectorEmbeddingService {
     @Value("${dashscope.embedding.model}")
     private String model;
 
+    @Value("${rag.embedding.cache.enabled:true}")
+    private boolean cacheEnabled;
+
+    @Value("${rag.embedding.cache.max-size:1000}")
+    private long cacheMaxSize;
+
+    @Value("${rag.embedding.cache.ttl-minutes:60}")
+    private long cacheTtlMinutes;
+
     private TextEmbedding textEmbedding;
+
+    /** 查询向量缓存：key = 查询文本，value = 向量。相同文本得到相同向量，严格无损。 */
+    private Cache<String, List<Float>> queryVectorCache;
 
     @PostConstruct
     public void init(){
@@ -55,6 +71,18 @@ public class VectorEmbeddingService {
 
         // 初始化 TextEmbedding 实例
         textEmbedding = new TextEmbedding();
+
+        // 初始化查询向量缓存（带容量上限、过期、命中率统计）
+        if (cacheEnabled) {
+            queryVectorCache = Caffeine.newBuilder()
+                    .maximumSize(cacheMaxSize)
+                    .expireAfterWrite(Duration.ofMinutes(cacheTtlMinutes))
+                    .recordStats()
+                    .build();
+            logger.info("查询向量缓存已启用, maxSize: {}, ttl: {}分钟", cacheMaxSize, cacheTtlMinutes);
+        } else {
+            logger.info("查询向量缓存已禁用");
+        }
 
         logger.info("阿里云 DashScope Embedding 服务初始化完成，模型: {}", model);
     }
@@ -136,6 +164,17 @@ public class VectorEmbeddingService {
     }
 
     public List<Float> generateQueryVector(String query) {
-        return generateEmbedding(query);
+        if (!cacheEnabled || query == null || query.isBlank()) {
+            return generateEmbedding(query);
+        }
+        List<Float> cached = queryVectorCache.getIfPresent(query);
+        if (cached != null) {
+            CacheStats stats = queryVectorCache.stats();
+            logger.info("查询向量缓存命中, 命中率: {}", String.format("%.2f%%", stats.hitRate() * 100));
+            return cached;
+        }
+        List<Float> vector = generateEmbedding(query);
+        queryVectorCache.put(query, vector);
+        return vector;
     }
 }

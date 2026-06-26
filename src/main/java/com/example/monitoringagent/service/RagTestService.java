@@ -120,6 +120,7 @@ public class RagTestService {
         result.setActualAnswer(queryResult.getAnswer());
         result.setRetrievedDocuments(queryResult.getSearchResults());
         result.setLatencyMs(queryResult.getLatencyMs());
+        result.setFirstTokenMs(queryResult.getFirstTokenMs());
         result.setHitExpectedDoc(hitExpectedDoc(testCase.getExpectedDocIds(), queryResult.getSearchResults()));
         result.setKeywordRecall(calculateKeywordRecall(testCase.getExpectedKeywords(), queryResult.getAnswer()));
         result.setTopKRecall(calculateTopKRecall(testCase.getExpectedDocIds(), queryResult.getSearchResults()));
@@ -150,7 +151,7 @@ public class RagTestService {
 
     public String exportResults(List<RagTestResult> results, String format) {
         if (isCsv(format)) {
-            StringBuilder csv = new StringBuilder("caseId,question,expectedAnswer,actualAnswer,retrievedDocIds,scores,hitExpectedDoc,keywordRecall,topKRecall,mrr,ndcg,answerRelevancy,latencyMs,passed,errorMessage\n");
+            StringBuilder csv = new StringBuilder("caseId,question,expectedAnswer,actualAnswer,retrievedDocIds,scores,hitExpectedDoc,keywordRecall,topKRecall,mrr,ndcg,answerRelevancy,latencyMs,firstTokenMs,passed,errorMessage\n");
             for (RagTestResult result : results) {
                 csv.append(csvLine(
                         result.getCaseId(),
@@ -166,6 +167,7 @@ public class RagTestService {
                         String.format(Locale.ROOT, "%.4f", result.getNdcg()),
                         String.format(Locale.ROOT, "%.4f", result.getAnswerRelevancy()),
                         String.valueOf(result.getLatencyMs()),
+                        String.valueOf(result.getFirstTokenMs()),
                         String.valueOf(result.isPassed()),
                         result.getErrorMessage()
                 ));
