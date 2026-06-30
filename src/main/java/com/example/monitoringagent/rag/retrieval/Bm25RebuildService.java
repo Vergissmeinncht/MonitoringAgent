@@ -33,16 +33,19 @@ public class Bm25RebuildService {
     private final Bm25IndexService bm25IndexService;
     private final DocumentChunkService chunkService;
     private final RagProperties ragProperties;
+    private final com.example.monitoringagent.service.document.DocumentProcessorRegistry documentProcessorRegistry;
 
     @Value("${file.upload.path}")
     private String uploadPath;
 
     public Bm25RebuildService(Bm25IndexService bm25IndexService,
                               DocumentChunkService chunkService,
-                              RagProperties ragProperties) {
+                              RagProperties ragProperties,
+                              com.example.monitoringagent.service.document.DocumentProcessorRegistry documentProcessorRegistry) {
         this.bm25IndexService = bm25IndexService;
         this.chunkService = chunkService;
         this.ragProperties = ragProperties;
+        this.documentProcessorRegistry = documentProcessorRegistry;
     }
 
     public RebuildResult rebuild() {
@@ -62,19 +65,32 @@ public class Bm25RebuildService {
                 List<Path> regularFiles = files.filter(Files::isRegularFile).toList();
                 for (Path file : regularFiles) {
                     try {
-                        String content = Files.readString(file);
                         String normalizedPath = file.normalize().toString().replace(File.separatorChar, '/');
+
+                        // 跳过不支持的文件类型
+                        String fileName = file.getFileName().toString();
+                        int dot = fileName.lastIndexOf('.');
+                        String ext = dot < 0 ? "" : fileName.substring(dot + 1).toLowerCase();
+                        if (!documentProcessorRegistry.isSupported(ext)) {
+                            logger.warn("BM25 重建跳过不支持的文件类型: {}", normalizedPath);
+                            continue;
+                        }
+
+                        com.example.monitoringagent.service.document.DocumentParseResult parsed =
+                                documentProcessorRegistry.parse(file);
+                        String content = parsed.getContent();
 
                         List<DocumentChunk> chunks = chunkService.chunkDocument(content, normalizedPath);
                         for (DocumentChunk chunk : chunks) {
                             String id = UUID.nameUUIDFromBytes(
                                     (normalizedPath + " " + chunk.getChunkIndex()).getBytes()).toString();
-                            String metadataJson = buildMetadataJson(normalizedPath, chunk, chunks.size());
+                            String metadataJson = buildMetadataJson(normalizedPath, chunk, chunks.size(), parsed);
                             bm25IndexService.writeChunk(writer, id, chunk.getContent(), metadataJson, normalizedPath);
                             chunkCount++;
                         }
                         fileCount++;
-                        logger.info("BM25 重建已处理文件: {}, 分片数: {}", normalizedPath, chunks.size());
+                        logger.info("BM25 重建已处理文件: {}, 处理器: {}, 分片数: {}",
+                                normalizedPath, parsed.getParserName(), chunks.size());
                     } catch (Exception e) {
                         logger.warn("BM25 重建跳过文件: {}, 错误: {}", file, e.getMessage());
                     }
@@ -89,7 +105,8 @@ public class Bm25RebuildService {
         return new RebuildResult(fileCount, chunkCount);
     }
 
-    private String buildMetadataJson(String normalizedPath, DocumentChunk chunk, int totalChunks) {
+    private String buildMetadataJson(String normalizedPath, DocumentChunk chunk, int totalChunks,
+                                     com.example.monitoringagent.service.document.DocumentParseResult parsed) {
         Map<String, Object> metadata = new HashMap<>();
         Path path = Paths.get(normalizedPath);
         Path fileName = path.getFileName();
@@ -104,6 +121,10 @@ public class Bm25RebuildService {
         metadata.put("_file_name", fileNameStr);
         metadata.put("chunkIndex", chunk.getChunkIndex());
         metadata.put("totalChunks", totalChunks);
+        if (parsed != null) {
+            metadata.put("_file_type", parsed.getFileType());
+            metadata.put("_parser", parsed.getParserName());
+        }
         if (chunk.getTitle() != null && !chunk.getTitle().isEmpty()) {
             metadata.put("title", chunk.getTitle());
         }

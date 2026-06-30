@@ -58,6 +58,11 @@ public class FileUploadController {
 
             // 使用原始文件名，而不是UUID，以便实现基于文件名的去重
             Path filePath = uploadDir.resolve(originalFilename).normalize();
+
+            // 防止路径穿越：解析后的路径必须仍在上传目录内
+            if (!filePath.startsWith(uploadDir)) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("非法的文件名");
+            }
             
             // 如果文件已存在，先删除旧文件（实现覆盖更新）
             if (Files.exists(filePath)) {
@@ -149,7 +154,10 @@ public class FileUploadController {
         if (allowedExtensions == null || allowedExtensions.isEmpty()) {
             return false;
         }
-        List<String> allowedList = Arrays.asList(allowedExtensions.split(","));
+        List<String> allowedList = Arrays.stream(allowedExtensions.split(","))
+                .map(String::trim)
+                .map(String::toLowerCase)
+                .toList();
         return allowedList.contains(extension.toLowerCase());
     }
 }

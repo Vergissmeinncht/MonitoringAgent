@@ -4,7 +4,7 @@ server:
 file:
   upload:
     path: ./uploads
-    allowed-extensions: txt,md
+    allowed-extensions: txt,md,markdown,pdf,doc,docx
 
 milvus:
   host: localhost
@@ -40,7 +40,7 @@ spring:
         sse:
           connections:
             tencent-cls:
-              url: http://localhost:3000
+              url: http://localhost:3300
               sse-endpoint: /sse  # ???SSE????
 
   servlet:
@@ -99,7 +99,7 @@ chat:
 prometheus:
   base-url: http://localhost:9090
   timeout: 10  # ???????
-  mock-enabled: true  # ???? Mock ????????
+  mock-enabled: false  # ???? Mock ????????
 
 # CLS ???????
 cls:

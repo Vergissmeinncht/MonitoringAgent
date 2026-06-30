@@ -41,6 +41,9 @@ public class VectorIndexService {
     @Autowired
     private com.example.monitoringagent.rag.retrieval.Bm25IndexService bm25IndexService;
 
+    @Autowired
+    private com.example.monitoringagent.service.document.DocumentProcessorRegistry documentProcessorRegistry;
+
     @Value("${file.upload.path}")
     private String uploadPath;
 
@@ -59,9 +62,11 @@ public class VectorIndexService {
         }
         logger.info("开始索引文件: {}", filePath);
         // 实现单文件的向量索引逻辑
-        //1. 读取文件内容
-        String content = Files.readString(path);
-        logger.info("读取文件：{}，内容长度: {}", filePath, content.length());
+        //1. 按文件类型解析出纯文本
+        com.example.monitoringagent.service.document.DocumentParseResult parsed =
+                documentProcessorRegistry.parse(path);
+        String content = parsed.getContent();
+        logger.info("读取文件：{}，处理器: {}，内容长度: {}", filePath, parsed.getParserName(), content.length());
 
         //2.删除该文件的旧数据（如果存在）
         deleteExistingData(path.toString());
@@ -79,6 +84,8 @@ public class VectorIndexService {
 
                 //构建元数据
                 Map<String,Object> metadata = buildMetadata(path.toString(), chunk, chunks.size());
+                metadata.put("_file_type", parsed.getFileType());
+                metadata.put("_parser", parsed.getParserName());
 
                 //插入到Milvus中
                 insertToMilvus(chunk.getContent(), vector, metadata,chunk.getChunkIndex());
