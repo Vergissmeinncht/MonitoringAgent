@@ -108,6 +108,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
+        <!-- MongoDB（会话持久化 + 长期记忆正文与溯源） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-mongodb</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-devtools</artifactId>
@@ -214,7 +219,7 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
-                    <mainClass>org.example.monitoringagent.MonitoringAgentApplication</mainClass>
+                    <mainClass>com.example.monitoringagent.MonitoringAgentApplication</mainClass>
                 </configuration>
             </plugin>
 

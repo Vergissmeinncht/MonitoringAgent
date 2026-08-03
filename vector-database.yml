@@ -68,6 +68,19 @@ services:
       MILVUS_URL: standalone:19530
     depends_on:
       - standalone # 确保 Milvus 启动后再启动 Attu
+  # MongoDB：会话持久化与长期记忆正文存储
+  mongo:
+    container_name: monitoring-mongo
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/mongo:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
 networks:
   default:
     name: milvus

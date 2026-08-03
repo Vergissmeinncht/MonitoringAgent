@@ -49,6 +49,11 @@ spring:
       enabled: true
       force: true
 
+  # MongoDB：会话持久化与长期记忆正文存储
+  data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://localhost:27017/monitoring_agent}
+
 
 
 # ??? DashScope Embedding API ??
@@ -94,6 +99,18 @@ chat:
     reserved-output-tokens: 2000
     min-recent-message-pairs: 3
     summary-max-tokens: 1000
+
+# 记忆系统（阶段一：会话持久化；后续阶段扩展长期记忆）
+memory:
+  persistence:
+    enabled: true          # 会话历史与 summary 落库开关
+  long-term:
+    enabled: true
+    extraction-enabled: true
+    retrieval-top-k: 5
+    confidence-threshold: 0.75
+    max-memories-per-user: 500
+    semantic-search-enabled: false
 
 # Prometheus ??
 prometheus:

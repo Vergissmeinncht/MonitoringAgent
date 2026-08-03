@@ -40,8 +40,20 @@ public class VectorSearchService {
      * @return 搜索结果列表
      */
     public List<SearchResult> searchSimilarDocuments(String query, int topK) {
+        return searchSimilarDocuments(MilvusConstants.MILVUS_COLLECTION_NAME, query, topK);
+    }
+
+    /**
+     * 在指定 collection 中搜索相似文档
+     *
+     * @param collectionName 集合名称（biz 业务知识库 / memory 长期记忆库）
+     * @param query 查询文本
+     * @param topK 返回最相似的K个结果
+     * @return 搜索结果列表
+     */
+    public List<SearchResult> searchSimilarDocuments(String collectionName, String query, int topK) {
         try {
-            logger.info("开始搜索相似文档, 查询: {}, topK: {}", query, topK);
+            logger.info("开始搜索相似文档, collection: {}, 查询: {}, topK: {}", collectionName, query, topK);
 
             //TODO:优化查询文本，比如扩写、假回答等，以提高搜索效果
 
@@ -51,7 +63,7 @@ public class VectorSearchService {
 
             // 2. 构建搜索参数
             SearchParam searchParam = SearchParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                    .withCollectionName(collectionName)
                     .withVectorFieldName("vector")
                     .withVectors(Collections.singletonList(queryVector))
                     .withTopK(topK)

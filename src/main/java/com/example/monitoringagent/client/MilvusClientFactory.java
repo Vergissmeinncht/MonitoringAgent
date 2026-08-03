@@ -47,18 +47,9 @@ public class MilvusClientFactory {
             client = connectToMilvus();
             logger.info("成功连接到 Milvus");
 
-            // 2. 检查并创建 biz collection（如果不存在）
-            if (!collectionExists(client, MilvusConstants.MILVUS_COLLECTION_NAME)) {
-                logger.info("collection '{}' 不存在，正在创建...", MilvusConstants.MILVUS_COLLECTION_NAME);
-                createBizCollection(client);
-                logger.info("成功创建 collection '{}'", MilvusConstants.MILVUS_COLLECTION_NAME);
-
-                // 创建索引
-                createIndexes(client);
-                logger.info("成功创建索引");
-            } else {
-                logger.info("collection '{}' 已存在", MilvusConstants.MILVUS_COLLECTION_NAME);
-            }
+            // 2. 检查并创建 collection（如果不存在）：业务知识库 + 长期记忆库，schema 一致
+            ensureCollection(client, MilvusConstants.MILVUS_COLLECTION_NAME, "Business knowledge collection");
+            ensureCollection(client, MilvusConstants.MEMORY_COLLECTION_NAME, "Cross-session long-term memory collection");
 
             return client;
 
@@ -104,9 +95,25 @@ public class MilvusClientFactory {
     }
 
     /**
-     * 创建 biz collection
+     * 确保指定 collection 存在，不存在则创建并建索引
      */
-    private void createBizCollection(MilvusServiceClient client) {
+    private void ensureCollection(MilvusServiceClient client, String collectionName, String description) {
+        if (!collectionExists(client, collectionName)) {
+            logger.info("collection '{}' 不存在，正在创建...", collectionName);
+            createCollection(client, collectionName, description);
+            logger.info("成功创建 collection '{}'", collectionName);
+
+            createVectorIndex(client, collectionName);
+            logger.info("成功为 collection '{}' 创建索引", collectionName);
+        } else {
+            logger.info("collection '{}' 已存在", collectionName);
+        }
+    }
+
+    /**
+     * 创建 collection（id/vector/content/metadata 统一 schema）
+     */
+    private void createCollection(MilvusServiceClient client, String collectionName, String description) {
         // 定义字段
         FieldType idField = FieldType.newBuilder()
                 .withName("id")
@@ -143,8 +150,8 @@ public class MilvusClientFactory {
 
         // 创建 collection
         CreateCollectionParam createParam = CreateCollectionParam.newBuilder()
-                .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                .withDescription("Business knowledge collection")
+                .withCollectionName(collectionName)
+                .withDescription(description)
                 .withSchema(schema)
                 .withShardsNum(MilvusConstants.DEFAULT_SHARD_NUMBER)
                 .build();
@@ -156,12 +163,11 @@ public class MilvusClientFactory {
     }
 
     /**
-     * 为 collection 创建索引
+     * 为 collection 的 vector 字段创建索引
      */
-    private void createIndexes(MilvusServiceClient client) {
-        // 为 vector 字段创建索引（FloatVector 使用 IVF_FLAT 和 L2 距离）
+    private void createVectorIndex(MilvusServiceClient client, String collectionName) {
         CreateIndexParam vectorIndexParam = CreateIndexParam.newBuilder()
-                .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                .withCollectionName(collectionName)
                 .withFieldName("vector")
                 .withIndexType(IndexType.HNSW)
                 .withMetricType(MetricType.COSINE)  // 余弦相似度
@@ -173,7 +179,5 @@ public class MilvusClientFactory {
         if (response.getStatus() != 0) {
             throw new RuntimeException("创建 vector 索引失败: " + response.getMessage());
         }
-
-        logger.info("成功为 vector 字段创建索引");
     }
 }

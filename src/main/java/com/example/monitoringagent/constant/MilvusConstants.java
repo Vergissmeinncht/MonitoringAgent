@@ -7,9 +7,14 @@ public class MilvusConstants {
     public static final String MILVUS_DB_NAME = "default";
 
     /**
-     * Milvus 集合名称
+     * Milvus 集合名称（业务知识库）
      */
     public static final String MILVUS_COLLECTION_NAME = "biz";
+
+    /**
+     * Milvus 集合名称（跨会话长期记忆）
+     */
+    public static final String MEMORY_COLLECTION_NAME = "memory";
 
     /**
      * 向量维度（豆包 embedding 模型的维度）

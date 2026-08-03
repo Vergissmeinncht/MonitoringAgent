@@ -183,6 +183,73 @@ public class VectorIndexService {
     }
 
     /**
+     * 向指定 collection 插入单条向量记录（显式 id，无 BM25 双写）
+     * 用于长期记忆库等非文档管线场景
+     */
+    public void insertVector(String collectionName, String id, String content,
+                             List<Float> vector, Map<String, Object> metadata) throws Exception {
+        try {
+            R<RpcStatus> loadResponse = milvusClient.loadCollection(
+                    LoadCollectionParam.newBuilder()
+                            .withCollectionName(collectionName)
+                            .build()
+            );
+
+            if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
+                throw new RuntimeException("加载集合失败，状态码: " + loadResponse.getStatus() + ", 消息: " + loadResponse.getMessage());
+            }
+
+            List<InsertParam.Field> fields = new ArrayList<>();
+            fields.add(new InsertParam.Field("id", Collections.singletonList(id)));
+            fields.add(new InsertParam.Field("content", Collections.singletonList(content)));
+            fields.add(new InsertParam.Field("vector", Collections.singletonList(vector)));
+
+            Gson gson = new Gson();
+            JsonObject metadataJson = gson.toJsonTree(metadata == null ? new HashMap<>() : metadata).getAsJsonObject();
+            fields.add(new InsertParam.Field("metadata", Collections.singletonList(metadataJson)));
+
+            InsertParam insertParam = InsertParam.newBuilder()
+                    .withCollectionName(collectionName)
+                    .withFields(fields)
+                    .build();
+
+            R<MutationResult> insertResponse = milvusClient.insert(insertParam);
+            if (insertResponse.getStatus() != 0) {
+                throw new RuntimeException("插入数据失败，状态码: " + insertResponse.getStatus() + ", 消息: " + insertResponse.getMessage());
+            }
+            logger.debug("成功插入向量到 collection: {}, ID: {}, 内容长度: {}", collectionName, id, content.length());
+        } catch (Exception e) {
+            logger.error("插入向量到 collection {} 失败", collectionName, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 从指定 collection 删除单条记录（按主键 id）
+     */
+    public void deleteById(String collectionName, String id) throws Exception {
+        R<RpcStatus> loadResponse = milvusClient.loadCollection(
+                LoadCollectionParam.newBuilder()
+                        .withCollectionName(collectionName)
+                        .build()
+        );
+        if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
+            throw new RuntimeException("加载集合失败，状态码: " + loadResponse.getStatus() + ", 消息: " + loadResponse.getMessage());
+        }
+
+        String expr = String.format("id == \"%s\"", id);
+        DeleteParam deleteParam = DeleteParam.newBuilder()
+                .withCollectionName(collectionName)
+                .withExpr(expr)
+                .build();
+
+        R<MutationResult> response = milvusClient.delete(deleteParam);
+        if (response.getStatus() != 0) {
+            throw new RuntimeException("删除数据失败，状态码: " + response.getStatus() + ", 消息: " + response.getMessage());
+        }
+    }
+
+    /**
      * 插入到Milvus中
      */
     public void insertToMilvus(String content,List<Float> vector,

@@ -3,6 +3,7 @@ class SuperBizAgentApp {
     constructor() {
         this.apiBaseUrl = 'http://localhost:9900/api';
         this.currentMode = 'quick'; // 'quick' 或 'stream'
+        this.userId = this.getOrCreateUserId();
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
         this.currentChatHistory = []; // 当前对话的消息历史
@@ -549,6 +550,17 @@ class SuperBizAgentApp {
         return 'session_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
     }
 
+    // 浏览器级匿名用户标识：新会话复用，用于跨会话长期记忆。
+    getOrCreateUserId() {
+        const storageKey = 'monitoringAgentUserId';
+        let userId = localStorage.getItem(storageKey);
+        if (!userId) {
+            userId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+            localStorage.setItem(storageKey, userId);
+        }
+        return userId;
+    }
+
     // 发送消息
     async sendMessage() {
         let message = '';
@@ -612,7 +624,8 @@ class SuperBizAgentApp {
                 },
                 body: JSON.stringify({
                     Id: this.sessionId,
-                    Question: message
+                    Question: message,
+                    userId: this.userId
                 })
             });
 
@@ -668,7 +681,8 @@ class SuperBizAgentApp {
                 },
                 body: JSON.stringify({
                     Id: this.sessionId,
-                    Question: message
+                    Question: message,
+                    userId: this.userId
                 })
             });
 

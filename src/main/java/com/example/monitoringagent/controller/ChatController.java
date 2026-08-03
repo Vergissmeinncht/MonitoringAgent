@@ -10,6 +10,10 @@ import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import com.example.monitoringagent.dto.chat.ChatContext;
 import com.example.monitoringagent.dto.chat.ChatMessage;
+import com.example.monitoringagent.memory.MongoConversationStore;
+import com.example.monitoringagent.memory.LongTermMemoryService;
+import com.example.monitoringagent.memory.RestoredSession;
+import com.example.monitoringagent.memory.document.SessionDoc;
 import com.example.monitoringagent.service.AiOpsService;
 import com.example.monitoringagent.service.ChatService;
 import com.example.monitoringagent.service.ConversationCompressionService;
@@ -53,6 +57,12 @@ public class ChatController {
     private ConversationCompressionService compressionService;
 
     @Autowired
+    private MongoConversationStore conversationStore;
+
+    @Autowired
+    private LongTermMemoryService longTermMemoryService;
+
+    @Autowired
     private ToolCallbackProvider tools;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
@@ -76,10 +86,11 @@ public class ChatController {
             }
 
             // 获取或创建会话
-            SessionInfo session = getOrCreateSession(request.getId());
+            SessionInfo session = getOrCreateSession(request.getId(), request.getUserId());
 
             // 获取压缩后的对话上下文
             ChatContext context = session.prepareContext(request.getQuestion(), compressionService);
+            context.setLongTermMemories(longTermMemoryService.retrieve(request.getUserId(), request.getQuestion()));
             logger.info("会话历史消息对数: {}, 压缩次数: {}", session.getMessagePairCount(), session.getCompressionCount());
 
             // 创建 DashScope API 和 ChatModel
@@ -102,6 +113,8 @@ public class ChatController {
 
             // 更新会话历史
             session.addMessage(request.getQuestion(), fullAnswer);
+            longTermMemoryService.extractAsync(request.getUserId(), session.sessionId,
+                    request.getQuestion(), fullAnswer);
             logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}",
                     request.getId(), session.getMessagePairCount());
 
@@ -164,10 +177,11 @@ public class ChatController {
                 logger.info("收到 ReactAgent 对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
 
                 // 获取或创建会话
-                SessionInfo session = getOrCreateSession(request.getId());
+                SessionInfo session = getOrCreateSession(request.getId(), request.getUserId());
 
                 // 获取压缩后的对话上下文
                 ChatContext context = session.prepareContext(request.getQuestion(), compressionService);
+                context.setLongTermMemories(longTermMemoryService.retrieve(request.getUserId(), request.getQuestion()));
                 logger.info("ReactAgent 会话历史消息对数: {}, 压缩次数: {}", session.getMessagePairCount(), session.getCompressionCount());
 
                 // 创建 DashScope API 和 ChatModel
@@ -249,6 +263,8 @@ public class ChatController {
 
                                 // 更新会话历史
                                 session.addMessage(request.getQuestion(), fullAnswer);
+                                longTermMemoryService.extractAsync(request.getUserId(), session.sessionId,
+                                        request.getQuestion(), fullAnswer);
                                 logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}",
                                         request.getId(), session.getMessagePairCount());
 
@@ -384,7 +400,7 @@ public class ChatController {
         try {
             logger.info("收到获取会话信息请求 - SessionId: {}", sessionId);
 
-            SessionInfo session = sessions.get(sessionId);
+            SessionInfo session = getExistingSession(sessionId);
             if (session != null) {
                 SessionInfoResponse response = new SessionInfoResponse();
                 response.setSessionId(sessionId);
@@ -407,11 +423,42 @@ public class ChatController {
 
     // ==================== 辅助方法 ====================
 
-    private SessionInfo getOrCreateSession(String sessionId) {
+    private SessionInfo getOrCreateSession(String sessionId, String userId) {
         if (sessionId == null || sessionId.isEmpty()) {
             sessionId = UUID.randomUUID().toString();
         }
-        return sessions.computeIfAbsent(sessionId, SessionInfo::new);
+        SessionInfo result = sessions.computeIfAbsent(sessionId, id -> {
+            RestoredSession restored = conversationStore.restore(id);
+            if (restored != null) {
+                logger.info("从 MongoDB 恢复会话 - SessionId: {}, 历史消息数: {}", id, restored.getMessages().size());
+                return new SessionInfo(id, conversationStore, restored);
+            }
+            SessionInfo session = new SessionInfo(id, userId, conversationStore);
+            conversationStore.createSession(id, session.userId, session.createTime);
+            return session;
+        });
+        result.bindUser(userId);
+        return result;
+    }
+
+    /**
+     * 获取已存在的会话：内存未命中时尝试从 MongoDB 恢复，但不创建新会话。
+     * 用于只读查询接口，避免为不存在的 sessionId 生成空会话。
+     */
+    private SessionInfo getExistingSession(String sessionId) {
+        if (sessionId == null || sessionId.isEmpty()) {
+            return null;
+        }
+        SessionInfo cached = sessions.get(sessionId);
+        if (cached != null) {
+            return cached;
+        }
+        RestoredSession restored = conversationStore.restore(sessionId);
+        if (restored == null) {
+            return null;
+        }
+        logger.info("从 MongoDB 恢复会话（只读查询）- SessionId: {}", sessionId);
+        return sessions.computeIfAbsent(sessionId, id -> new SessionInfo(id, conversationStore, restored));
     }
 
     // ==================== 内部类 ====================
@@ -422,6 +469,8 @@ public class ChatController {
      */
     private static class SessionInfo {
         private final String sessionId;
+        private String userId;
+        private final MongoConversationStore store;
         private final List<ChatMessage> messageHistory;
         private final long createTime;
         private final ReentrantLock lock;
@@ -430,11 +479,52 @@ public class ChatController {
         private long lastCompressedAt;
         private int lastTokenEstimate;
 
-        public SessionInfo(String sessionId) {
+        public SessionInfo(String sessionId, MongoConversationStore store) {
+            this(sessionId, null, store);
+        }
+
+        public SessionInfo(String sessionId, String userId, MongoConversationStore store) {
             this.sessionId = sessionId;
+            this.userId = userId;
+            this.store = store;
             this.messageHistory = new ArrayList<>();
             this.createTime = System.currentTimeMillis();
             this.lock = new ReentrantLock();
+        }
+
+        public void bindUser(String requestedUserId) {
+            if (requestedUserId == null || requestedUserId.isBlank()) {
+                return;
+            }
+            lock.lock();
+            try {
+                if (userId != null && !userId.isBlank() && !userId.equals(requestedUserId)) {
+                    throw new IllegalArgumentException("该会话已绑定其他用户");
+                }
+                if (userId == null || userId.isBlank()) {
+                    userId = requestedUserId;
+                    store.bindUser(sessionId, requestedUserId);
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /**
+         * 从 MongoDB 恢复的会话：还原历史消息与压缩元数据。
+         */
+        public SessionInfo(String sessionId, MongoConversationStore store, RestoredSession restored) {
+            this.sessionId = sessionId;
+            this.store = store;
+            this.messageHistory = new ArrayList<>(restored.getMessages());
+            this.lock = new ReentrantLock();
+            SessionDoc meta = restored.getMeta();
+            this.userId = meta.getUserId();
+            this.summary = meta.getSummary();
+            this.compressionCount = meta.getCompressionCount();
+            this.lastCompressedAt = meta.getLastCompressedAt();
+            this.lastTokenEstimate = meta.getLastTokenEstimate();
+            this.createTime = meta.getCreateTime() > 0 ? meta.getCreateTime() : System.currentTimeMillis();
         }
 
         /**
@@ -447,6 +537,7 @@ public class ChatController {
                 messageHistory.add(ChatMessage.of("assistant", aiAnswer));
                 logger.debug("会话 {} 更新历史消息，当前消息对数: {}",
                         sessionId, messageHistory.size() / 2);
+                store.appendMessagePair(sessionId, userId, userQuestion, aiAnswer);
             } finally {
                 lock.unlock();
             }
@@ -470,6 +561,8 @@ public class ChatController {
                         compressionCount++;
                         lastCompressedAt = System.currentTimeMillis();
                         logger.info("会话 {} 上下文压缩完成，压缩后估算 token: {}", sessionId, lastTokenEstimate);
+                        store.replaceMessages(sessionId, userId, messageHistory);
+                        store.updateSessionState(sessionId, summary, compressionCount, lastCompressedAt, lastTokenEstimate);
                     }
                 }
                 return toChatContext();
@@ -500,6 +593,7 @@ public class ChatController {
                 compressionCount = 0;
                 lastCompressedAt = 0;
                 lastTokenEstimate = 0;
+                store.clear(sessionId);
                 logger.info("会话 {} 历史消息已清空", sessionId);
             } finally {
                 lock.unlock();
@@ -568,6 +662,10 @@ public class ChatController {
         @com.fasterxml.jackson.annotation.JsonProperty(value = "Question")
         @com.fasterxml.jackson.annotation.JsonAlias({"question", "QUESTION"})
         private String Question;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("userId")
+        @com.fasterxml.jackson.annotation.JsonAlias({"UserId", "USER_ID"})
+        private String userId;
 
     }
 

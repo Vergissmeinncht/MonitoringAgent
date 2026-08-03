@@ -11,5 +11,6 @@ import java.util.List;
 public class ChatContext {
     private String summary;
     private List<ChatMessage> recentMessages = new ArrayList<>();
+    private List<String> longTermMemories = new ArrayList<>();
     private int compressionCount;
 }
